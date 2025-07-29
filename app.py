@@ -29,8 +29,83 @@ excel_file = st.sidebar.file_uploader("Upload your campaign metrics Excel file",
 
 image_folder = st.sidebar.text_input("Path to your image folder", value="images/")
 
+import re
+
+def clean_gpt_code(gpt_code):
+    # Remove code fences and 'python' artifacts
+    code = gpt_code.strip()
+    code = re.sub(r"^```(?:python)?\s*", "", code)  # Remove starting ```python or ```
+    code = re.sub(r"\s*```$", "", code)            # Remove trailing ```
+    code = code.strip()
+    return code
+
+# === Helper function to extract taxonomy values ===
+def extract_taxonomy_value(text, key):
+    try:
+        parts = str(text).split('_')
+        for part in parts:
+            if part.startswith(f"{key}~"):
+                return part.split('~')[1].strip()
+        return None
+    except:
+        return None
+
+# === Enrich dataframe with derived fields ===
+def enrich_dataframe(df):
+    if "Campaign" in df.columns:
+        df["Objective"] = df["Campaign"].apply(lambda x: extract_taxonomy_value(x, "CA"))
+        df["Project"] = df["Campaign"].apply(lambda x: extract_taxonomy_value(x, "MB"))
+    if "Ad" in df.columns:
+        df["Size"] = df["Ad"].apply(lambda x: extract_taxonomy_value(x, "SZ"))
+        df["Language"] = df["Ad"].apply(lambda x: extract_taxonomy_value(x, "LG"))
+        df["Market"] = df["Ad"].apply(lambda x: extract_taxonomy_value(x, "MK"))
+        df["Channel"] =df["Ad"].apply(lambda x: extract_taxonomy_value(x, "CH"))
+
+    df = df.iloc[:-1]
+    return df
+
+def get_column_summary(df):
+    summary = {}
+    for col in ["Campaign", "Creative", "Objective", "Project", "Date", "Ad" , "Language", "Market", "Channel", "Size", "Site (CM360)"]:
+        if col in df.columns:
+            unique_vals = df[col].dropna().astype(str).unique().tolist()
+            summary[col] = unique_vals[:10]  # show top 20 per column
+    return summary
+
+def query_chatbot(df, user_prompt):
+    system_prompt = f"""
+You are a helpful data assistant. You are working with a Pandas dataframe called `df` with the following columns:
+{list(df.columns)}
+
+Here are sample values for key columns:
+{get_column_summary(df)}
+
+The user will ask a question. Your job is to generate **pure Python code** using Pandas to answer it.
+Do not import anything. Only use variables `df` and `pd`.
+
+At the end, assign the result to a variable called `result`.
+If the user is asking for a single number, make sure result is a number.
+If it is a table, result should be a DataFrame or Series.
+Return only the code, nothing else.
+
+
+    """.strip()
+
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        temperature=0,
+    )
+
+    code = response.choices[0].message.content.strip()
+
+    return code
+
 # Tabs
-tab1, tab2 = st.tabs([" View Predictions", " Predict New Ad"])
+tab1, tab2, tab3 = st.tabs([" View Predictions", " Predict New Ad", "Query Exisiting Data"])
 
 # ----------------------------- #
 # TAB 1: View Predictions
@@ -78,7 +153,7 @@ with tab1:
         if len(X) == 0:
             st.error("No valid images found matching the campaign names.")
         else:
-            model, raw_preds, r2 = train_model(X, y)
+            model, raw_preds, r2 = train_model(X, y, df)
 
             
             preds = np.clip(raw_preds, 0, 1)
@@ -111,6 +186,7 @@ with tab1:
                 - **CTR Error:** `{row['CTR Error']:.4f}`
                 """)
                 st.markdown("---")
+                
 
 with tab2:
     st.subheader("Upload a New Ad Image")
@@ -206,3 +282,57 @@ with tab2:
 
         except Exception as e:
             st.error(f" Error processing image: {e}")
+
+
+with tab3:
+    st.header("Campaign Query Tool")
+
+    uploaded_file = st.file_uploader("Upload Daily Campaign Delivery File", type=["csv", "xlsx"])
+
+    if uploaded_file is not None:
+        if uploaded_file.name.endswith(".csv"):
+            df = pd.read_csv(uploaded_file)
+        else:
+            df = pd.read_excel(uploaded_file)
+
+        df = enrich_dataframe(df)
+
+        st.session_state["raw_campaign_df"] = df
+
+        st.subheader("Data Preview")
+        st.dataframe(df.head(20))
+    else:
+        st.info("Please upload a daily delivery file to begin.")
+
+    st.subheader(" Ask Questions About Your Daily Data")
+    user_question = st.text_input("Ask a question eg- How many clicks did creative Engagement-Display-Summer25-Inspire-TLP-DE-Grn-300x250-NA get on July 24")
+
+    if user_question and "raw_campaign_df" in st.session_state:
+        df = st.session_state["raw_campaign_df"]
+
+        try:
+            gpt_code = query_chatbot(df, user_question)
+            clean_code = clean_gpt_code(gpt_code)
+            st.code(clean_code, language="python")
+
+            try:
+                local_vars = {
+                    "df": df.copy(),
+                    "pd": pd,
+                    "np": np
+                }
+                local_vars["df"]["Date"] = pd.to_datetime(local_vars["df"]["Date"])
+                exec(clean_code, {}, local_vars)
+                result = local_vars.get("result", "No result returned.")
+            except Exception as e:
+                st.error(f"❌ Error running cleaned code:\n{e}")
+
+            if isinstance(result, (int, float, str, np.integer, np.floating)):
+            
+                result = result.item() if isinstance(result, np.generic) else result
+                st.metric(label="Result", value=result)
+            else:
+                st.dataframe(result)
+
+        except Exception as e:
+            st.error(f"Error while running GPT-generated code:\n{e}")
