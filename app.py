@@ -80,13 +80,17 @@ You are a helpful data assistant. You are working with a Pandas dataframe called
 Here are sample values for key columns:
 {get_column_summary(df)}
 
-The user will ask a question. Your job is to generate **pure Python code** using Pandas to answer it.
-Do not import anything. Only use variables `df` and `pd`.
+Your job is to:
+1. Generate **pure Python code** using Pandas to answer the user's question.
+2. Assign the result to a variable called `result`.
+3. On a new line, provide a chart type comment: e.g., `# chart: bar`, `# chart: line`, or `# chart: none`.
 
-At the end, assign the result to a variable called `result`.
-If the user is asking for a single number, make sure result is a number.
-If it is a table, result should be a DataFrame or Series.
-Return only the code, nothing else.
+Only suggest a chart if the result is a DataFrame or Series (e.g. grouped output, daily trend, comparison).
+If the result is a single number or scalar, return `# chart: none`.
+If your result is a DataFrame with one or more numeric columns and one categorical column, use .set_index() to make the categorical column the x-axis. You dont have to do this when not needed, only do this if you think its needed to make more sense
+If the data contains multiple rows for the same value (e.g. same Creative, Campaign, or Date), use .groupby() and aggregate (e.g. .sum() or .mean()) before assigning to result. Do not return raw repeated rows unless specifically requested.”
+Do not import anything. Only use variables `df` and `pd`.
+Return only code and the chart comment. No explanation.
 
 
     """.strip()
@@ -103,6 +107,20 @@ Return only the code, nothing else.
     code = response.choices[0].message.content.strip()
 
     return code
+
+def parse_code_and_chart_type(gpt_code):
+    lines = gpt_code.strip().splitlines()
+    chart_type = "none"
+    code_lines = []
+
+    for line in lines:
+        if line.strip().lower().startswith("# chart:"):
+            chart_type = line.strip().split(":", 1)[1].strip().lower()
+        else:
+            code_lines.append(line)
+
+    return "\n".join(code_lines), chart_type
+
 
 # Tabs
 tab1, tab2, tab3 = st.tabs([" View Predictions", " Predict New Ad", "Query Exisiting Data"])
@@ -312,7 +330,8 @@ with tab3:
 
         try:
             gpt_code = query_chatbot(df, user_question)
-            clean_code = clean_gpt_code(gpt_code)
+            clean_code_raw = clean_gpt_code(gpt_code)
+            clean_code, chart_type = parse_code_and_chart_type(clean_code_raw)
             st.code(clean_code, language="python")
 
             try:
@@ -325,7 +344,7 @@ with tab3:
                 exec(clean_code, {}, local_vars)
                 result = local_vars.get("result", "No result returned.")
             except Exception as e:
-                st.error(f"❌ Error running cleaned code:\n{e}")
+                st.error(f" Error running cleaned code:\n{e}")
 
             if isinstance(result, (int, float, str, np.integer, np.floating)):
             
@@ -333,6 +352,23 @@ with tab3:
                 st.metric(label="Result", value=result)
             else:
                 st.dataframe(result)
+                    # Optional chart rendering based on GPT suggestion
+                if chart_type != "none" and isinstance(result, (pd.DataFrame, pd.Series)):
+                    st.markdown("####  Suggested Chart")
+                    try:
+                        if chart_type == "line":
+                            st.line_chart(result)
+                        elif chart_type == "bar":
+                            st.bar_chart(result)
+                        elif chart_type == "area" or chart_type == "stacked":
+                            st.area_chart(result)
+                        elif chart_type == "pie":
+                            st.pyplot(result.plot.pie(autopct="%1.1f%%", legend=False).figure)
+                        elif chart_type == "scatter":
+                            st.scatter_chart(result)
+                    except Exception as e:
+                        st.error(f" Error rendering chart: {e}")
+
 
         except Exception as e:
             st.error(f"Error while running GPT-generated code:\n{e}")
