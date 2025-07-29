@@ -11,7 +11,6 @@ from prompts import generate_pros_cons_prompt
 from dotenv import load_dotenv
 load_dotenv(".env.local")
 from openai import OpenAI
-import os
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -30,6 +29,10 @@ excel_file = st.sidebar.file_uploader("Upload your campaign metrics Excel file",
 image_folder = st.sidebar.text_input("Path to your image folder", value="images/")
 
 import re
+
+def get_image_path(creative_name):
+    image_path = os.path.join("images", f"{creative_name}.jpg")
+    return image_path if os.path.exists(image_path) else None
 
 def clean_gpt_code(gpt_code):
     # Remove code fences and 'python' artifacts
@@ -84,13 +87,19 @@ Your job is to:
 1. Generate **pure Python code** using Pandas to answer the user's question.
 2. Assign the result to a variable called `result`.
 3. On a new line, provide a chart type comment: e.g., `# chart: bar`, `# chart: line`, or `# chart: none`.
-
+when grouping creatives, remember that there can be multiple rows for the same creative and date, so make sure to aggregate them as together when required
 Only suggest a chart if the result is a DataFrame or Series (e.g. grouped output, daily trend, comparison).
 If the result is a single number or scalar, return `# chart: none`.
 If your result is a DataFrame with one or more numeric columns and one categorical column, use .set_index() to make the categorical column the x-axis. You dont have to do this when not needed, only do this if you think its needed to make more sense
 If the data contains multiple rows for the same value (e.g. same Creative, Campaign, or Date), use .groupby() and aggregate (e.g. .sum() or .mean()) before assigning to result. Do not return raw repeated rows unless specifically requested.”
 Do not import anything. Only use variables `df` and `pd`.
 Return only code and the chart comment. No explanation.
+
+✅ Additionally: if the query involves any Creative(s), return a second variable called `creative_info` that contains a grouped summary of the matching creative(s) from the original dataframe `df`. make sure that it is filtered and is respective to the result only
+make sure to group them respectively, i want impressions, clicks, click rate, size, market, language, channel, objective, project. Do NOT call .set_index("Creative") after a .groupby("Creative") aggregation — it's already the index.
+Only use .set_index("Creative") if the Creative column was reset or not the index.
+
+
 
 
     """.strip()
@@ -125,9 +134,7 @@ def parse_code_and_chart_type(gpt_code):
 # Tabs
 tab1, tab2, tab3 = st.tabs([" View Predictions", " Predict New Ad", "Query Exisiting Data"])
 
-# ----------------------------- #
 # TAB 1: View Predictions
-# ----------------------------- #
 with tab1:
     if excel_file and image_folder:
         st.info("Processing data and extracting image features...")
@@ -277,7 +284,7 @@ with tab2:
                 st.markdown(feedback)
 
 
-                # --- Similarity Search ---
+                # similarity searchcZ
                 st.markdown("###  Top 3 Similar Ads")
                 db = np.load("model_store.npz", allow_pickle=True)["metadata"]
                 db = db.tolist()
@@ -343,6 +350,7 @@ with tab3:
                 local_vars["df"]["Date"] = pd.to_datetime(local_vars["df"]["Date"])
                 exec(clean_code, {}, local_vars)
                 result = local_vars.get("result", "No result returned.")
+                creative_info = local_vars.get("creative_info", None)
             except Exception as e:
                 st.error(f" Error running cleaned code:\n{e}")
 
@@ -368,6 +376,21 @@ with tab3:
                             st.scatter_chart(result)
                     except Exception as e:
                         st.error(f" Error rendering chart: {e}")
+            if isinstance(creative_info, pd.DataFrame) and not creative_info.empty:
+                st.markdown("#### 🎨 Creative Summary")
+                creative_info["Image"] = creative_info.index.map(get_image_path)
+
+                for idx, row in creative_info.iterrows():
+                    col1, col2 = st.columns([1, 3])
+
+                    if row["Image"]:
+                        col1.image(row["Image"], width=150)
+                    else:
+                        col1.write("❌ No image")
+
+                    col2.markdown("\n".join([
+                        f"**{col}:** {row[col]}" for col in creative_info.columns if col != "Image"
+                    ]))
 
 
         except Exception as e:
